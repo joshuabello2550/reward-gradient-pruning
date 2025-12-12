@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Pruning LLMs with Reward Model Gradients</title>
+
+    <style>
+        /* ----- Global styles ----- */
+        :root {
+            /* Body text: SF Pro Text on macOS, otherwise system UI */
+            --body-font: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                system-ui, "Segoe UI", sans-serif;
+
+            /* Title / monospaced text: SF Mono on macOS, otherwise common monospace */
+            --mono-font: "SF Mono", SFMono-Regular, ui-monospace,
+                Menlo, Monaco, Consolas, "Liberation Mono",
+                "Courier New", monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f3f7fd;
+            color: #111;
+            font-family: var(--body-font);
+            font-size: 17px;
+            /* closer to original body size */
+            line-height: 1.55;
+            /* slightly tighter like screenshot */
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        a {
+            color: #00796b;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* ----- Sidebar ----- */
+        .sidebar {
+            position: fixed;
+            top: 120px;
+            left: 40px;
+            width: 170px;
+            padding-left: 4px;
+            font-size: 14px;
+        }
+
+        .sidebar-title {
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .sidebar-nav {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .sidebar-nav li {
+            margin-bottom: 14px;
+        }
+
+        .sidebar-nav a {
+            display: inline-block;
+            line-height: 1.3;
+        }
+
+        /* ----- Main paper layout ----- */
+        .main {
+            margin-left: 240px;
+            /* leave space for sidebar */
+            padding: 24px 32px 60px 0;
+        }
+
+        .paper {
+            background-color: #ffffff;
+            border: 1px solid #e1e4ec;
+            margin: 8px 40px 40px;
+            padding: 24px 32px 36px;
+            max-width: 980px;
+        }
+
+        /* ----- Title block ----- */
+        .paper-title {
+            font-family: var(--mono-font);
+            /* SF Mono-style title */
+            font-size: 2.5rem;
+            /* ~40px */
+            font-weight: 400;
+            line-height: 1.25;
+            margin: 0 0 20px 0;
+            letter-spacing: 0.06em;
+            /* a bit more spacing like original */
+        }
+
+        .paper-meta {
+            font-size: 15px;
+            margin-bottom: 18px;
+        }
+
+        .paper-divider {
+            height: 1px;
+            background-color: #e7ebf5;
+            margin: 12px -32px 24px;
+        }
+
+        /* ----- Sections ----- */
+        section {
+            margin-bottom: 32px;
+        }
+
+        section h2 {
+            font-size: 22px;
+            /* closer to original heading size */
+            margin: 0 0 10px 0;
+            font-weight: 700;
+        }
+
+        p {
+            margin: 0 0 14px 0;
+            /* a bit more space between paragraphs */
+        }
+
+        /* ----- Citations (inline) ----- */
+        .cite {
+            font-size: 0.75em;
+            vertical-align: super;
+        }
+
+        /* ----- References list ----- */
+        .references {
+            font-size: 15px;
+            margin-top: 8px;
+        }
+
+        .references ol {
+            list-style: none;
+            /* remove default 1. 2. 3. */
+            counter-reset: ref-counter;
+            padding-left: 0;
+            margin: 0;
+        }
+
+        .references li {
+            counter-increment: ref-counter;
+            margin-bottom: 8px;
+        }
+
+        .references li::before {
+            content: "[" counter(ref-counter) "] ";
+        }
+
+        /* ----- Figures with right-side caption ----- */
+        .figure-row {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 24px 0 32px 0;
+        }
+
+        .figure-main {
+            flex: 1 1 auto;
+        }
+
+        .figure-main img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .figure-caption {
+            flex: 0 0;
+            margin-top: 8px;
+            margin-left: 24px;
+            font-size: 14px;
+            line-height: 1.4;
+            color: #444;
+            text-align: center;
+        }
+
+        @media (max-width: 900px) {
+            .figure-row {
+                flex-direction: column;
+            }
+
+            .figure-caption {
+                margin-left: 0;
+                margin-top: 12px;
+            }
+        }
+
+        h3 {
+            color: rgb(107, 107, 107);
+        }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+
+<body>
+
+    <!-- Fixed Outline sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-title">Outline</div>
+        <ul class="sidebar-nav">
+            <li><a href="#introduction">Introduction</a></li>
+            <li><a href="#background">Background and<br>Related Work</a></li>
+            <li><a href="#methods">Methods</a></li>
+            <li><a href="#results">Results</a></li>
+            <li><a href="#conclusion">Conclusion</a></li>
+            <li><a href="#references">References</a></li>
+        </ul>
+    </aside>
+
+    <!-- Main document -->
+    <div class="main">
+        <article class="paper">
+            <!-- Title & author info -->
+            <header>
+                <h1 class="paper-title">
+                    Pruning LLMs with Reward Model Gradients
+                </h1>
+                <div class="paper-meta">
+                    Joshua Bello, Diego Coello, and Jabes Gallardo<br>
+                    Final project for 6.7960, MIT
+                </div>
+                <div class="paper-divider"></div>
+            </header>
+
+            <!-- Sections -->
+            <section id="introduction">
+                <h2>Introduction</h2>
+
+                <p>Modern large language models (LLMs) achieve strong performance largely due to their scale, but this
+                    scale makes them expensive. While very large models are often necessary during training, using them
+                    directly at inference time incurs high costs in memory, latency, energy, and hardware. These
+                    constraints limit real-world deployment, especially for edge devices, low-resource settings, and
+                    independent developers. Model compression addresses this training–deployment mismatch by enabling
+                    smaller, more efficient inference models while preserving performance close to the uncompressed
+                    baseline.</p>
+
+                <p>Common approaches to model compression include quantization, which reduces numerical precision, and
+                    knowledge distillation, which transfers knowledge from a larger teacher model to a smaller student
+                    model. The compression technique we focus on is pruning: systematically removing individual weights,
+                    neurons, or entire layers from a neural network by zeroing their values based on an importance
+                    criterion.</p>
+
+                <p>
+                    Our work is inspired by gradient-based pruning methods that use the gradient of the loss with
+                    respect
+                    to the weights as part of the pruning criterion. Unlike prior approaches that rely on cross-entropy
+                    gradients from language-model pretraining, we instead use gradients from reward model loss functions
+                    <sup>
+                        <a href="#ref-schulman2017-ppo">[1]</a>
+                        <a href="#ref-williams1992-reinforce">[2]</a>
+                    </sup>,
+                    in the hope of better reflecting alignment with human preferences during pruning. We
+                    hypothesize that pruning with reward-specific gradients will preferentially preserve capabilities
+                    aligned with that reward signal—for example, a pruned model using a safety-oriented reward model
+                    will better maintain performance on truthfulness and toxicity benchmarks compared to pruned models
+                    using a reward model trained on general instruction-following data. We test this hypothesis by
+                    training multiple reward models from distinct feedback sources and systematically comparing their
+                    effects on downstream task performance after pruning.
+                </p>
+
+                <!-- Example figure block; replace src and caption when you have a real figure
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="figure1.png" alt="Example plot of pruning performance">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 1:</strong> Example caption describing the main result of the figure.
+                        Update this text and the image source once you have your actual figure.
+                    </div>
+                </div>
+                -->
+            </section>
+
+            <section id="background">
+                <h2>Background and Related Work</h2>
+
+                <h3>Pruning Methods</h3>
+
+                <p>
+                    Magnitude pruning is a straightforward pruning method that uses the magnitudes of the model weights
+                    as the pruning metric. After specifying a sparsity level and granularity (e.g., unstructured or
+                    layerwise), the weights with the smallest magnitudes are removed (or set to zero). Magnitude pruning
+                    is not computationally expensive relative to advanced pruning techniques such as SparseGPT
+                    <sup><a href="#ref-frantar2023-sparsegpt">[15]</a></sup>. It has proven to be effective at
+                    compressing small models while maintaining a similar level of performance, but has been shown to
+                    fail dramatically on massive LLMs even with relatively low levels of sparsity
+                    <sup><a href="#ref-sun2023-simple">[3]</a></sup>.
+                </p>
+
+                <p>
+                    WANDA pruning <sup><a href="#ref-sun2023-simple">[3]</a></sup> is a pruning method that multiplies
+                    the magnitudes of weights by the corresponding input activations over a calibration dataset and uses
+                    this product as an importance criterion. The paper presents an example highlighting the differences
+                    in weight selection between magnitude and WANDA pruning. Imagine a neuron with two inputs and two
+                    weights, where \( y = w_1 x_1 + w_2 x_2 \). We are looking to prune one of the weights, and
+                    \(|w_1| &lt; |w_2|\). Under magnitude pruning, we would prune \(w_1\). Now, if \(|x_1| \gg |x_2|\),
+                    then it is possible that \(|w_1 x_1| &gt; |w_2 x_2|\), meaning that the contribution to the neuron’s
+                    output coming from \(w_1\) is greater than the contribution from \(w_2\), despite \(w_1\) being
+                    smaller. Hence, under WANDA pruning, we would prune \(w_2\). Compared to magnitude pruning, WANDA
+                    introduces only a small additional computational overhead, stemming from the need to compute
+                    activation-based importance scores via an extra forward pass through the model. Despite this added
+                    cost, the empirical results in the WANDA study demonstrate clear advantages at higher sparsity
+                    levels, where it consistently maintains performance that is far better than magnitude-based pruning.
+                </p>
+
+                <p>
+                    GBLM pruning <sup><a href="#ref-das2023-beyond">[4]</a></sup> further explores gradient-informed
+                    pruning criteria for LLMs. According to the paper, gradients, despite being correlated with the
+                    importance of weights for LLM pruning, are underutilized in pruning metrics. To address this, the
+                    GBLM-Pruner method calculates the importance of each weight by multiplying the weight’s magnitude
+                    and its gradient with respect to the cross-entropy loss and, optionally, adding the weight
+                    multiplied by its input activation (the metric from WANDA pruning). Given a specified sparsity
+                    level, the weights with the lowest importance scores are removed (set to zero). The paper reports
+                    that LLMs pruned with GBLM-Pruner outperform the same models pruned with previous methods on several
+                    evaluation metrics.
+                </p>
+
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="diagrams/general_pruning_figure.png"
+                            alt="General pruning diagram illustrating the GBLM-style importance metric">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 1:</strong>
+                        A brief illustration of the GBLM-Pruner method.
+                    </div>
+                </div>
+
+                <p>
+                    Our pruning metric follows the GBLM-Pruner formulation shown in the equation below, with one key
+                    modification: instead of using gradients derived from the cross-entropy pretraining loss, we use
+                    gradients from a REINFORCE-based reinforcement learning loss that is typically applied during
+                    reward-model fine-tuning of the LLM.
+                </p>
+
+                <p>
+                    \[
+                    \mathbf{W}_m[i,j] = \alpha \cdot \left|\mathbf{W}[i,j]\right| \cdot \left\|\mathbf{G}[:,
+                    i,j]\right\|_{p}
+                    + \left|\mathbf{W}[i,j]\right| \cdot \left\| \mathbf{X}[:,j]\right\|_2
+                    \]
+                </p>
+
+                <h3>Reinforcement Learning and Fine-Tuning</h3>
+
+                <p>
+                    Reinforcement learning from human feedback (RLHF)
+                    <sup><a href="#ref-ouyang2022-instructgpt">[5]</a></sup>
+                    is a process used in the post-training of a model where feedback from humans is used to improve a
+                    model’s performance at a downstream task. RLHF has been applied to many of the generative models we
+                    know today, such as ChatGPT and DALL·E, to make their outputs more human-like, helpful, and
+                    truthful, among other desired properties. In this framework, human feedback is first collected to
+                    train a separate reward model, which then assigns rewards to the LLM’s outputs and is used to update
+                    the LLM via a PPO-based objective. Evidence from this work and prior studies suggests that the type
+                    of demonstration data used to train the reward model strongly influences the types of tasks on which
+                    the LLM improves after fine-tuning. This inspired us to investigate whether a similar relationship
+                    between the reward model’s training data and the updated LLM would emerge if we modified the LLM by
+                    pruning it based on the gradient of a REINFORCE-style loss, rather than fine-tuning it with PPO.
+                </p>
+            </section>
+
+            <section id="methods">
+                <h2>Methods</h2>
+
+                <h3>Model and Overall Setup</h3>
+                <p>
+                    For all of our studies, we use the open-source Llama-3.2-1B large language model as the benchmark
+                    model to which we apply different pruning methods, and also as the base model for our reward models
+                    used in gradient-based pruning. To train the reward models, we use the Tinker API from Thinking
+                    Machines, which provides an interface for large-scale LoRA-based fine-tuning and reinforcement
+                    learning. Both uses are explained in more detail below.
+                </p>
+
+                <h3>Training the Reward Models</h3>
+                <p>
+                    To create the reward models used in the process of calculating the gradients for the GBLM-Pruner
+                    method, we train three instances of Llama-3.2-1B on the HH-RLHF
+                    dataset <sup><a href="#ref-bai2022-hhrlhf">[16]</a></sup>, the UltraFeedback dataset
+                    <sup><a href="#ref-cui2023-ultrafeedback">[17]</a></sup>, and the Chatbot Arena Conversations
+                    dataset <sup><a href="#ref-zheng2023-chatbotarena">[18]</a></sup>, respectively, using Bradley–Terry
+                    loss with LoRA adapters.
+                </p>
+
+                <p>
+                    The HH-RLHF dataset contains human preference data about helpfulness and harmlessness, consisting of
+                    chosen versus rejected responses in dialogue settings. The UltraFeedback (UF) dataset contains
+                    diverse preference data, including annotations and ratings regarding instruction-following,
+                    truthfulness, honesty, and helpfulness across a wide variety of prompts. The Chatbot Arena
+                    Conversations dataset aggregates user preferences between responses from pairs of LLMs to the same
+                    prompt in a head-to-head evaluation setting. By training separate reward models on each dataset, we
+                    obtain three distinct reward signals reflecting different notions of “good” behavior.
+                </p>
+
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="diagrams/model_pipeline_1.png" alt="Diagram of the reward-model training pipeline">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 2:</strong>
+                        High-level overview of how separate reward models are trained on HH-RLHF, UltraFeedback,
+                        and Chatbot Arena preference data using Bradley–Terry loss with LoRA adapters.
+                    </div>
+                </div>
+
+
+                <h3>Making the Pruned Models</h3>
+                <p>
+                    Starting with the original pre-trained Llama-3.2-1B model, we save one unmodified instance to use as
+                    our benchmark “No Pruning” baseline. We then create multiple additional instances of the original
+                    model, one for each pruning method: a magnitude-pruned baseline and modified versions of
+                    GBLM-Pruner for each reward model using REINFORCE loss. For all pruning metrics, we apply global
+                    unstructured pruning over linear layers, ranking individual weights by their importance scores and
+                    zeroing the lowest-scoring weights to reach a target sparsity level.
+                </p>
+
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="diagrams/model_pipeline_2.png"
+                            alt="Diagram of the pruning and REINFORCE-based gradient pipeline">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 3:</strong>
+                        A high-level overview of our gradient pruning process of Llama 3.2-1B. The black arrows
+                        represent
+                        forward passes, whereas the red arrows represent backward passes in the pipeline.
+                    </div>
+                </div>
+
+                <p>
+                    We now describe how reward-model comparisons are used to compute REINFORCE gradients for each model
+                    parameter. Starting with an instance of the original Llama-3.2-1B model, a single prompt is passed
+                    into the LLM four times to produce four different responses. Each of the four responses is then
+                    paired with each of the others to produce six unique response pairings. These six response pairs are
+                    passed through the same reward model, yielding six preference scores. A score of \(-1\) indicates
+                    that response A is preferred, \(1\) indicates that response B is preferred, and \(0\) corresponds to
+                    a tie.
+                </p>
+
+                <p>
+                    For each of the four responses, we compute an average preference score by subtracting its number of
+                    losses from its number of wins against the other responses, and then dividing this difference by the
+                    number of matchups (three in this case). These average scores define the rewards used in a
+                    REINFORCE loss for each response. We compute the REINFORCE loss for all four responses and aggregate
+                    the four loss values (e.g., by averaging) to obtain a single scalar loss for the prompt. This
+                    completes a forward pass through the full system.
+                </p>
+
+                <p>
+                    We then backpropagate this loss through the original LLM to compute gradients with respect to all
+                    model parameters. While we could use gradients from a single prompt, in practice we use a batch of
+                    128 input prompts and aggregate the resulting gradients for each weight. Specifically, for each
+                    parameter we take the L1 norm (i.e., the sum of absolute values) of its gradients across the batch
+                    to obtain a reward-specific gradient magnitude. These aggregated gradient norms are substituted for
+                    \(\mathbf{G}\) in the GBLM-Pruner importance metric, producing a reward-model-dependent importance
+                    score for each weight. Finally, for a given target sparsity, we prune the weights with the lowest
+                    importance scores.
+                </p>
+
+
+                <h3>Evaluation</h3>
+                <p>
+                    We evaluate our models across multiple datasets to measure performance on a diverse set of tasks,
+                    including language modeling perplexity, zero-shot accuracy on a variety of question-answering
+                    benchmarks, and hate speech detection. This allows us to compare how different pruning strategies
+                    and reward signals affect both general language modeling quality and alignment-relevant behaviors.
+                </p>
+            </section>
+
+            <section id="results">
+                <h2>Results</h2>
+
+                <h3>Perplexity</h3>
+                <p>
+                    The table below reports perplexity on the WikiText-2 (Merity et al., 2016) validation set at 50%
+                    sparsity for magnitude pruning and the various reward-model–guided pruning methods. Among all pruned
+                    models, Arena achieves the lowest perplexity value at 22.6 (lower perplexity is better), remaining
+                    within only 2.3× of the unpruned baseline despite removing half of the parameters. HH and
+                    UltraFeedback also substantially outperform magnitude pruning; however, their perplexity score
+                    remains noticeably higher than Arena.
+                </p>
+
+                <div class="figure-row">
+                    <table border="1" cellspacing="0" cellpadding="4">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>No Pruning</th>
+                                <th>Magnitude (50%)</th>
+                                <th>HH (50%)</th>
+                                <th>UF (50%)</th>
+                                <th>Arena (50%)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Perplexity</td>
+                                <td>9.916</td>
+                                <td>1732.262</td>
+                                <td>54.618</td>
+                                <td>61.442</td>
+                                <td>22.561</td>
+                            </tr>
+                        </tbody>
+
+                    </table>
+                    <div class="figure-caption">
+                        <strong>Table 2:</strong> WikiText-2 perplexity of pruned LLaMA-3.2-1B models under 50%
+                        unstructured global pruning of linear layers.
+                        Reward-model–guided pruning achieves substantially lower perplexity than magnitude pruning,
+                        demonstrating superior preservation of language modeling performance.
+                    </div>
+                </div>
+
+                <p>
+                    Magnitude pruning catastrophically degrades language modeling quality, increasing perplexity by more
+                    than two orders of magnitude relative to the unpruned baseline. This trend is clearly illustrated in
+                    the perplexity–sparsity plot across pruning methods. As sparsity increases toward 75%, magnitude
+                    pruning exhibits an exponential rise in perplexity, whereas reward-guided pruning methods degrade
+                    far more gradually. These results strongly indicate that reward-aligned pruning better identifies
+                    parameters that are critical for preserving next-token predictive structure, while magnitude-based
+                    pruning alone fails to maintain the underlying language modeling distribution.
+                </p>
+
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="diagrams/perplexity_v_sparsity.png"
+                            alt="Plot of perplexity vs pruning for various methods">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 5:</strong> Perplexity as a function of sparsity for different pruning methods.
+                        The y-axis is shown on a logarithmic scale, illustrating the exponential increase in perplexity
+                        (lower is better) as sparsity rises under magnitude pruning.
+                        In contrast, reward-model–guided pruning exhibits a substantially slower growth in perplexity,
+                        indicating superior preservation of language modeling performance at higher sparsity levels.
+                    </div>
+                </div>
+
+                <h3>Zero-Shot Evaluation</h3>
+                <p>
+                    In addition to perplexity, we further evaluate our method on 7 zero-shot commonsense reasoning tasks
+                    from the EleutherAI lm-evaluation-harness benchmark (lm-evaluation-harness; Gao et al., 2021): BoolQ
+                    (Clark et al., 2019), RTE (Wang et al., 2018), HellaSwag (Zellers et al., 2019), WinoGrande
+                    (Sakaguchi et al., 2019), ARC-Easy (Clark et al., 2018), ARC-Challenge (Clark et al., 2018), and
+                    OpenBookQA (Mihaylov et al., 2018). As noted in prior work (Dettmers & Zettlemoyer, 2022; Frantar &
+                    Alistarh, 2023), zero-shot evaluation on individual tasks can be noisy; however, aggregated
+                    performance across multiple benchmarks provides a more reliable and interpretable measure of model
+                    quality.
+                </p>
+
+                <div class="figure-row">
+                    <table border="1" cellspacing="0" cellpadding="4">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>boolq</th>
+                                <th>rte</th>
+                                <th>hellaswag</th>
+                                <th>arc_easy</th>
+                                <th>arc_challenge</th>
+                                <th>winogrande</th>
+                                <th>openbookqa</th>
+                                <th>mean</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>No Pruning</td>
+                                <td>0.64</td>
+                                <td>0.56</td>
+                                <td>0.48</td>
+                                <td>0.66</td>
+                                <td>0.32</td>
+                                <td>0.61</td>
+                                <td>0.28</td>
+                                <td>0.51</td>
+                            </tr>
+                            <tr>
+                                <td>Arena (50%)</td>
+                                <td>0.61</td>
+                                <td>0.52</td>
+                                <td>0.35</td>
+                                <td>0.53</td>
+                                <td>0.23</td>
+                                <td>0.55</td>
+                                <td>0.17</td>
+                                <td>0.42</td>
+                            </tr>
+                            <tr>
+                                <td>HH (50%)</td>
+                                <td>0.61</td>
+                                <td>0.53</td>
+                                <td>0.30</td>
+                                <td>0.42</td>
+                                <td>0.20</td>
+                                <td>0.52</td>
+                                <td>0.12</td>
+                                <td>0.39</td>
+                            </tr>
+                            <tr>
+                                <td>Magnitude (50%)</td>
+                                <td>0.39</td>
+                                <td>0.50</td>
+                                <td>0.26</td>
+                                <td>0.27</td>
+                                <td>0.19</td>
+                                <td>0.49</td>
+                                <td>0.15</td>
+                                <td>0.32</td>
+                            </tr>
+                            <tr>
+                                <td>UF (50%)</td>
+                                <td>0.59</td>
+                                <td>0.53</td>
+                                <td>0.29</td>
+                                <td>0.40</td>
+                                <td>0.19</td>
+                                <td>0.51</td>
+                                <td>0.12</td>
+                                <td>0.38</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="figure-caption">
+                        <strong>Table 1:</strong> Zero-shot evaluation results for 50% unstructured global pruning of
+                        linear layers in LLaMA-3.1-1B.
+                        The mean results show that reward-model–guided pruning substantially outperforms standard
+                        magnitude pruning across evaluated tasks.
+                    </div>
+                </div>
+
+                <p>
+                    Overall, Arena consistently emerges as the strongest pruned model across all seven benchmarks. In
+                    contrast, magnitude pruning yields the worst accuracy on every task, demonstrating severe
+                    performance degradation. HH and UltraFeedback perform comparably to one another and substantially
+                    outperform magnitude pruning, but they consistently trail Arena by approximately 2–4 points in mean
+                    accuracy. Notably, performance degradation is not uniform across tasks. Fact-based tasks such as
+                    BoolQ, RTE, and ARC-Easy degrade more gracefully under pruning, whereas multi-step reasoning tasks
+                    such as ARC-Challenge and OpenBookQA are significantly more sensitive. One possible explanation is
+                    that reasoning-related weights emerge mainly during fine-tuning rather than pretraining, which may
+                    make them more sensitive to parameter removal and therefore more susceptible to pruning.
+                </p>
+
+                <h3>Fine-tuned Trends in Pruned Models</h3>
+
+                <p>
+                    We additionally investigate whether performance trends observed in models fine-tuned with different
+                    reward models persist after pruning. To this end, we evaluate pruned models on two safety- and
+                    truthfulness-oriented benchmarks: TruthfulQA-MC1 <sup><a
+                            href="#ref-lin2022-truthfulqa">[19]</a></sup> and ToxiGen <sup><a
+                            href="#ref-hartvigsen2022-toxigen">[20]</a></sup>. TruthfulQA assesses a model’s resistance
+                    to hallucination and misinformation by measuring its ability to produce factually correct answers,
+                    while ToxiGen evaluates whether a model generates toxic or discriminatory content. Based on the
+                    objectives of the reward models, we hypothesized that models fine-tuned with the HH-RLHF reward
+                    model would outperform those trained with UltraFeedback, with Arena exhibiting the weakest
+                    performance, since HH-RLHF explicitly rewards helpful and non-harmful responses. However, this
+                    expected ordering is not reflected in the experimental results. On TruthfulQA-MC1 at 50% sparsity,
+                    the HH-pruned model ranks second behind UltraFeedback, while on ToxiGen it performs worst at the
+                    same sparsity level. Another surprising observation is a non-monotonic trend across both tasks,
+                    where accuracy improves at 50% sparsity before degrading at 75%. One possible explanation is that
+                    these models are initially overparameterized, such that moderate sparsity can act as a form of
+                    regularization and transiently improve performance. Alternatively, this behavior may be attributable
+                    to evaluation noise, consistent with prior observations regarding the high variance of these
+                    benchmarks.
+                </p>
+
+
+                <div class="figure-row">
+                    <div class="figure-main">
+                        <img src="diagrams/trends_v_sparsity.png" alt="Example plot of pruning performance">
+                    </div>
+                    <div class="figure-caption">
+                        <strong>Figure 5:</strong> The left plot shows the accuracy of the pruned models on the
+                        TruthfulQA MC1 dataset across different sparsity levels.
+                        A surprising trend emerges in which increasing sparsity leads to improved accuracy up to 50%
+                        sparsity,
+                        followed by a decline back toward the 25% sparsity level at 75% sparsity.
+                        The right plot shows the accuracy of the pruned models on the ToxiGen dataset at various
+                        sparsity levels.
+                        A similar pattern is observed, with accuracy initially increasing and then decreasing as
+                        sparsity grows;
+                        however, some pruning methods exhibit a nearly monotonic increase in accuracy with higher
+                        sparsity, which is particularly unexpected.
+                    </div>
+                </div>
+
+            </section>
+
+            <section id="conclusion">
+                <h2>Conclusion</h2>
+                <p>
+                    While we hypothesized that reward-specific pruning would selectively preserve capabilities aligned
+                    with each reward model’s training objective
+                    (e.g., safety-aligned rewards yielding superior performance on truthfulness and toxicity
+                    benchmarks), our results do not provide consistent or
+                    conclusive evidence for this effect. The observed performance trends across TruthfulQA and ToxiGen
+                    are non-monotonic and do not follow the
+                    expected ordering among reward models, suggesting that any alignment-specific retention under
+                    pruning is weaker, more variable, or more dataset-dependent
+                    than initially hypothesized. These findings indicate that, although reward-model–guided pruning is
+                    highly effective at preserving general language modeling
+                    and reasoning performance, its ability to selectively preserve reward-aligned behavioral traits
+                    remains an open question for future investigation.
+                </p>
+
+                <h3>Limitations</h3>
+                <p>
+                    This study does not directly compare the reward-guided gradients used for pruning with the
+                    cross-entropy gradients
+                    used in GBLM-Pruner. As a result, we cannot yet quantify how fundamentally different these gradient
+                    signals are.
+                    In addition, our experiments are restricted to small-scale models, and we do not evaluate the
+                    scalability of
+                    reward-guided pruning to larger architectures in the 7B–70B range. We also limit our analysis to
+                    unstructured
+                    sparsity and do not examine structured pruning variants, which may exhibit different
+                    stability–efficiency trade-offs.
+                </p>
+
+                <h3>Future Work</h3>
+                <p>
+                    It would be interesting to investigate post-pruning fine-tuning: after pruning with a given reward
+                    model,
+                    how well can the resulting sparse model be further fine-tuned using the same reward signal?
+                    Such experiments would shed light on whether reward-guided pruning merely removes redundant
+                    parameters or
+                    also impairs the model’s capacity to absorb additional alignment information.
+                </p>
+
+            </section>
+
+            <section id="references">
+                <h2>References</h2>
+                <div class="references">
+                    <ol>
+                        <!-- [1] PPO -->
+                        <li id="ref-schulman2017-ppo">
+                            J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov,
+                            “Proximal Policy Optimization Algorithms,”
+                            <em>arXiv preprint</em> arXiv:1707.06347, 2017.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1707.06347" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1707.06347
+                            </a>
+                        </li>
+
+                        <!-- [2] REINFORCE -->
+                        <li id="ref-williams1992-reinforce">
+                            R. J. Williams,
+                            “Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning,”
+                            <em>Machine Learning</em>, vol. 8, pp. 229–256, 1992.
+                            [Online]. Available:
+                            <a href="https://link.springer.com/article/10.1007/BF00992696" target="_blank"
+                                rel="noopener noreferrer">
+                                https://link.springer.com/article/10.1007/BF00992696
+                            </a>
+                        </li>
+
+                        <!-- Existing pruning / LLM papers (now [3]–[6]) -->
+                        <li id="ref-sun2023-simple">
+                            M. Sun, Z. Liu, A. Bair, and J. Z. Kolter,
+                            “A Simple and Effective Pruning Approach for Large Language Models,”
+                            <em>arXiv preprint</em> arXiv:2306.11695, 2023.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2306.11695" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2306.11695
+                            </a>
+                        </li>
+                        <li id="ref-das2023-beyond">
+                            R. J. Das, M. Sun, L. Ma, and Z. Shen,
+                            “Beyond Size: How Gradients Shape Pruning Decisions in Large Language Models,”
+                            <em>arXiv preprint</em> arXiv:2311.04902, 2023.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2311.04902" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2311.04902
+                            </a>
+                        </li>
+                        <li id="ref-ouyang2022-instructgpt">
+                            L. Ouyang, J. Wu, X. Jiang, <em>et al.</em>,
+                            “Training Language Models to Follow Instructions with Human Feedback,”
+                            <em>arXiv preprint</em> arXiv:2203.02155, 2022.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2203.02155" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2203.02155
+                            </a>
+                        </li>
+                        <li id="ref-lee2018-snip">
+                            N. Lee, T. Ajanthan, and P. H. S. Torr,
+                            “SNIP: Single-shot Network Pruning Based on Connection Sensitivity,”
+                            <em>arXiv preprint</em> arXiv:1810.02340, 2018.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1810.02340" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1810.02340
+                            </a>
+                        </li>
+
+                        <!-- lm-eval-harness & benchmarks -->
+                        <li id="ref-gao2021-lmeval">
+                            L. Gao, J. Tow, S. Biderman, S. Black, A. DiPofi, C. Foster, <em>et al.</em>,
+                            “A Framework for Few-shot Language Model Evaluation,” 2021.
+                            [Online]. Available:
+                            <a href="https://github.com/EleutherAI/lm-evaluation-harness" target="_blank"
+                                rel="noopener noreferrer">
+                                https://github.com/EleutherAI/lm-evaluation-harness
+                            </a>
+                        </li>
+                        <li id="ref-clark2019-boolq">
+                            C. Clark, K. Lee, M.-W. Chang, T. Kwiatkowski, M. Collins, and K. Toutanova,
+                            “BoolQ: Exploring the Surprising Difficulty of Natural Yes/No Questions,”
+                            in <em>Proc. NAACL-HLT</em>, 2019.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1905.10044" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1905.10044
+                            </a>
+                        </li>
+                        <li id="ref-wang2018-glue">
+                            A. Wang, A. Singh, J. Michael, F. Hill, O. Levy, and S. R. Bowman,
+                            “GLUE: A Multi-Task Benchmark and Analysis Platform for Natural Language Understanding,”
+                            <em>arXiv preprint</em> arXiv:1804.07461, 2018.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1804.07461" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1804.07461
+                            </a>
+                        </li>
+                        <li id="ref-zellers2019-hellaswag">
+                            R. Zellers, A. Holtzman, Y. Bisk, A. Farhadi, and Y. Choi,
+                            “HellaSwag: Can a Machine Really Finish Your Sentence?,”
+                            in <em>Proc. ACL</em>, 2019.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1905.07830" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1905.07830
+                            </a>
+                        </li>
+                        <li id="ref-sakaguchi2019-winogrande">
+                            K. Sakaguchi, R. Bras, C. Bhagavatula, and Y. Choi,
+                            “WinoGrande: An Adversarial Winograd Schema Challenge at Scale,”
+                            <em>arXiv preprint</em> arXiv:1907.10641, 2019.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1907.10641" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1907.10641
+                            </a>
+                        </li>
+                        <li id="ref-clark2018-arc">
+                            P. Clark, I. Cowhey, O. Etzioni, T. Khot, A. Sabharwal, C. Schoenick, and O. Tafjord,
+                            “Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge,”
+                            <em>arXiv preprint</em> arXiv:1803.05457, 2018.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1803.05457" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1803.05457
+                            </a>
+                        </li>
+                        <li id="ref-mihaylov2018-openbookqa">
+                            T. Mihaylov, P. Clark, T. Khot, and A. Sabharwal,
+                            “Can a Suit of Armor Conduct Electricity? A New Dataset for Open Book Question Answering,”
+                            in <em>Proc. EMNLP</em>, 2018.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/1809.02789" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/1809.02789
+                            </a>
+                        </li>
+
+                        <!-- Compression baselines -->
+                        <li id="ref-dettmers2022-llmint8">
+                            T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer,
+                            “LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale,”
+                            <em>arXiv preprint</em> arXiv:2208.07339, 2022.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2208.07339" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2208.07339
+                            </a>
+                        </li>
+                        <li id="ref-frantar2023-sparsegpt">
+                            E. Frantar and D. Alistarh,
+                            “SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot,”
+                            in <em>Proc. ICML</em>, 2023.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2301.00774" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2301.00774
+                            </a>
+                        </li>
+
+                        <!-- New dataset references -->
+                        <li id="ref-bai2022-hhrlhf">
+                            Y. Bai, A. Kadavath, S. Kundu, <em>et al.</em>,
+                            “Training a Helpful and Harmless Assistant with Reinforcement Learning from Human
+                            Feedback,”
+                            <em>arXiv preprint</em> arXiv:2204.05862, 2022.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2204.05862" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2204.05862
+                            </a>
+                        </li>
+                        <li id="ref-cui2023-ultrafeedback">
+                            G. Cui, C. Li, Y. Zhang, <em>et al.</em>,
+                            “UltraFeedback: Boosting Language Models with High-quality Feedback,”
+                            <em>arXiv preprint</em> arXiv:2310.01377, 2023.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2310.01377" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2310.01377
+                            </a>
+                        </li>
+                        <li id="ref-zheng2023-chatbotarena">
+                            L. Zheng, Y. Chiang, J. Wu, <em>et al.</em>,
+                            “Chatbot Arena Conversations Dataset,” LMSYS technical report, 2023.
+                            [Online]. Available:
+                            <a href="https://github.com/lm-sys/FastChat" target="_blank" rel="noopener noreferrer">
+                                https://github.com/lm-sys/FastChat
+                            </a>
+                        </li>
+
+                        <!-- Truthfulness & toxicity benchmarks ([19]–[20]) -->
+                        <li id="ref-lin2022-truthfulqa">
+                            S. Lin, J. Hilton, and O. Evans,
+                            “TruthfulQA: Measuring How Models Mimic Human Falsehoods,”
+                            in <em>Proc. ACL</em>, 2022.
+                            [Online]. Available:
+                            <a href="https://arxiv.org/abs/2109.07958" target="_blank" rel="noopener noreferrer">
+                                https://arxiv.org/abs/2109.07958
+                            </a>
+                        </li>
+
+                        <li id="ref-hartvigsen2022-toxigen">
+                            T. Hartvigsen, S. Gabriel, H. Palangi, M. Sap, D. Ray, and E. Kamar,
+                            “ToxiGen: A Large-Scale Machine-Generated Dataset for Adversarial and Implicit Hate Speech
+                            Detection,”
+                            in <em>Proc. ACL</em>, 2022.
+                            [Online]. Available:
+                            <a href="https://doi.org/10.18653/v1/2022.acl-long.234" target="_blank"
+                                rel="noopener noreferrer">
+                                https://doi.org/10.18653/v1/2022.acl-long.234
+                            </a>
+                        </li>
+                    </ol>
+                </div>
+            </section>
+
+        </article>
+    </div>
+
+</body>
+
+</html>
